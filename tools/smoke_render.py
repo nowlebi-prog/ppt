@@ -3,6 +3,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+for _s in (sys.stdout, sys.stderr):  # Windows 콘솔(cp1252/cp949)에서 한글 출력 오류 방지
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from pptx import Presentation  # noqa: E402
 
 from studio.importer import import_slide  # noqa: E402

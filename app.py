@@ -17,6 +17,12 @@ from urllib.parse import unquote, urlparse
 
 from studio import pipeline, relay, store
 
+for _s in (sys.stdout, sys.stderr):  # Windows 콘솔(cp1252/cp949)에서 한글 출력 오류 방지
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 WEB = store.WEB_DIR
 PORT = int(os.environ.get("PORT", "8765"))
 
