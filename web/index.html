@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>PPT Studio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="#/">PPT Studio</a>
+  <span id="crumb"></span>
+  <span class="spacer"></span>
+  <span id="mockBadge" class="badge warn" hidden>데모 모드</span>
+  <button class="ghost" onclick="openSettings()">설정</button>
+</header>
+<main id="app"></main>
+
+<dialog id="settings">
+  <form method="dialog" onsubmit="saveSettings(event)">
+    <h3>설정</h3>
+    <label>AI 연결 방식
+      <select name="mode">
+        <option value="manual">복붙 — ChatGPT 등 쓰던 구독으로 (API 키 불필요, 단계마다 복사·붙여넣기)</option>
+        <option value="api">API 자동 — 버튼만 누르면 끝 (OpenAI API 키 필요, 사용량만큼 과금)</option>
+      </select></label>
+    <p class="muted small" style="margin:4px 0 0">아래는 API 자동 모드에서만 사용합니다.</p>
+    <label>OpenAI API 키 <input name="api_key" type="password" placeholder="sk-... (변경할 때만 입력)"></label>
+    <label>API 주소 <input name="base_url"></label>
+    <div class="row2">
+      <label>텍스트/비전 모델 <input name="text_model"></label>
+      <label>이미지 모델 <input name="image_model"></label>
+    </div>
+    <div class="row2">
+      <label>에셋 이미지 품질 <select name="image_quality"><option>high</option><option>medium</option><option>low</option><option>auto</option></select></label>
+      <label>장표당 에셋 최대 개수 <input name="max_assets" type="number" min="0" max="12"></label>
+    </div>
+    <label>한 번에 작업할 장표 수 <input name="batch_size" type="number" min="1" max="10"></label>
+    <label class="check"><input name="self_check" type="checkbox"> 보여주기 전에 AI가 먼저 검수하고 1회 자동 수정 (API 모드 전용)</label>
+    <label class="check"><input name="mock" type="checkbox"> 데모 모드 (API 호출 없이 흐름만 테스트)</label>
+    <p class="muted small">키는 이 PC의 settings.json 에만 저장됩니다.</p>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost" onclick="this.closest('dialog').close()">닫기</button><button class="primary">저장</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
