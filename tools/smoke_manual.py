@@ -37,7 +37,7 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 B = f"http://127.0.0.1:{srv.server_address[1]}"
 created = []
 tmp = Path(tempfile.mkdtemp())
-stats = {"text": 0, "image": 0, "skip": 0, "broken": 0, "notes": 0}
+stats = {"text": 0, "image": 0, "skip": 0, "broken": 0, "notes": 0, "summary_imgs": None, "summary_len": 0}
 cancel_next = {"on": False}
 
 
@@ -65,8 +65,19 @@ def fake_user(pid, stop):
     while not stop.is_set():
         p = call(f"/api/projects/{pid}")
         for r in p["relay"]:
+            for marker in ("DECK_SUMMARY", "LAYOUT_DESIGN", "LAYOUT_REVISE", "SLIDE_CHAT", "{{", "}}"):
+                assert marker not in r["text"], (marker, r["text"][:300])
             if r["kind"] == "text":
-                assert "[작업 지침" in r["text"] and "[이번 요청]" in r["text"], r["text"][:200]
+                if r["task"] != "summary":
+                    assert "[참고: 작업 규칙" in r["text"], r["text"][-300:]
+                if r["images"]:
+                    assert "[첨부 이미지 — 순서대로]" in r["text"], r["text"][:300]
+                    assert len(r["descs"]) == len(r["images"])
+                    zipped = call(f"/api/relay/{r['id']}/images.zip")
+                    assert zipped[:2] == b"PK"
+                if r["task"] == "summary":
+                    stats["summary_imgs"] = len(r["images"])
+                    stats["summary_len"] = len(r["text"])
             else:
                 assert "이미지 1장만" in r["text"], r["text"][:200]
             for i in range(len(r["images"])):
@@ -87,12 +98,12 @@ def fake_user(pid, stop):
                     call(f"/api/relay/{r['id']}", {"action": "skip"})
                     stats["skip"] += 1
                 continue
-            if r["json"] and "LAYOUT_DESIGN" in r["text"] and not broke_once:
+            if r["json"] and r["task"] == "layout" and not broke_once:
                 broke_once = True
                 stats["broken"] += 1
                 call(f"/api/relay/{r['id']}", {"action": "answer", "answer": "네! 아래처럼 배치했어요 (잘림"})
                 continue
-            ans = _mock_chat("", [r["text"]], r["json"])
+            ans = _mock_chat(r["task"], r["json"])
             if r["json"]:
                 ans = "물론이죠!\n```json\n" + ans + "\n```\n필요하면 말씀해 주세요."  # ChatGPT 스타일 포장
             call(f"/api/relay/{r['id']}", {"action": "answer", "answer": ans})
@@ -117,8 +128,8 @@ def idle(no, stages=("review", "plan_review", "done", "error")):
 stop = threading.Event()
 try:
     srcs = []
-    for i in range(3):
-        f = tmp / f"p{i + 1}.png"
+    for i in range(12):
+        f = tmp / f"p{i + 1:02d}.png"
         f.write_bytes(placeholder_png(320, 180))
         srcs.append(("source", f))
     ref = tmp / "ref.png"
@@ -126,7 +137,8 @@ try:
     pid = call("/api/projects", {"name": "복붙 테스트", "request": "AI스럽지 않게"}, srcs + [("refs", ref)])["id"]
     created.append(pid)
     threading.Thread(target=fake_user, args=(pid, stop), daemon=True).start()
-    wait(pid, lambda p: len(p["pages"]) == 3 and not p["job"] and p["summary"], "ingest")
+    wait(pid, lambda p: len(p["pages"]) == 12 and not p["job"] and p["summary"], "ingest")
+    print("summary card: images", stats["summary_imgs"], "chars", stats["summary_len"])
 
     call(f"/api/projects/{pid}/batch", js={"slides": [1, 2, 3], "action": "plan"})
     wait(pid, lambda p: all(p["slides"][k]["stage"] == "plan_review" and not p["slides"][k]["job"]
@@ -156,6 +168,11 @@ try:
     call(f"/api/projects/{pid}/slides/3/retry", {"_": "1"})
     p = wait(pid, idle(3), "retry")
     assert p["slides"]["3"]["stage"] == "review", p["slides"]["3"]["error"]
+    try:
+        import PIL  # noqa: F401
+        assert stats["summary_imgs"] <= 3, f"12장 → 모음 시트로 합쳐져야 함: {stats['summary_imgs']}"
+    except ImportError:
+        print("(PIL 없음 — 모음 시트 검사 생략)")
     print("stats:", stats)
     print("MANUAL OK")
 finally:

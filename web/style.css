@@ -104,3 +104,5 @@ canvas.pen.on{pointer-events:auto;cursor:crosshair;outline:2px solid #E5231B}
 .thumb .num{position:absolute;left:4px;top:4px;background:var(--text);color:#fff;font-size:11px;border-radius:99px;padding:0 6px}
 .pastebox{margin-top:6px;border:1.5px dashed var(--line);border-radius:8px;padding:14px;text-align:center;color:var(--sub);font-size:12px;cursor:text}
 .pastebox:focus{border-color:var(--pt);outline:none;color:var(--text)}
+.rthumb{width:150px}
+.rthumb .cap{font-size:11px;color:var(--sub);margin-top:3px;line-height:1.3}

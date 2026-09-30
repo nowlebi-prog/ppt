@@ -151,9 +151,14 @@ function relayPanel() {
         <li><button class="accent" onclick="copyPrompt('${r.id}', this)">① 프롬프트 복사</button>
           <span class="muted small">ChatGPT <b>새 대화</b>에 붙여넣기 ${r.kind === "image" ? "(이미지 생성 요청)" : ""}</span>
           <details class="small"><summary>프롬프트 보기 (${r.text.length.toLocaleString()}자)</summary><pre class="rtext">${esc(r.text)}</pre></details></li>
-        ${r.images.length ? `<li><span>② 이미지 ${r.images.length}장 첨부</span> <span class="muted small">— 끌어다 놓거나 [복사] 후 ChatGPT에 Ctrl+V (순서대로)</span>
-          <div class="thumbs" style="margin-top:6px">${r.images.map((f, i) => `<div class="thumb"><img draggable="true" src="/api/relay/${r.id}/image/${i}" title="${esc(f)}">
-            <span class="num">${i + 1}</span><button onclick="copyImage('${r.id}',${i},this)">복사</button></div>`).join("")}</div></li>` : ""}
+        ${r.images.length ? `<li><span>② 이미지 ${r.images.length}장 첨부</span>
+          <div class="row" style="margin:6px 0">
+            <button class="primary" onclick="openRelayFolder('${r.id}')">📂 이미지 폴더 열기</button>
+            <span class="muted small">폴더에서 <b>Ctrl+A</b>로 전부 선택 → ChatGPT 입력창에 <b>한 번에 끌어다 놓기</b></span>
+            <a href="/api/relay/${r.id}/images.zip"><button class="ghost small">zip으로 받기</button></a></div>
+          <div class="thumbs">${r.images.map((f, i) => `<div class="thumb rthumb"><img draggable="true" src="/api/relay/${r.id}/image/${i}" title="${esc(r.descs?.[i] || f)}">
+            <span class="num">${i + 1}</span><button onclick="copyImage('${r.id}',${i},this)">복사</button>
+            <div class="cap">${esc(r.descs?.[i] || f)}</div></div>`).join("")}</div></li>` : ""}
         <li>${r.kind === "image"
           ? `<span>${r.images.length ? "③" : "②"} 생성된 이미지 저장 후 올리기</span>
              <div class="row" style="margin-top:6px"><input type="file" id="rfile-${r.id}" accept="image/*" style="width:auto">
@@ -174,6 +179,10 @@ async function copyPrompt(id, btn) {
   try { await navigator.clipboard.writeText(r.text); }
   catch { const t = document.createElement("textarea"); t.value = r.text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
   btn.textContent = "✓ 복사됨"; setTimeout(() => btn.textContent = "① 프롬프트 복사", 1500);
+}
+async function openRelayFolder(id) {
+  try { await postForm(`/api/relay/${id}/open`, new FormData()); }
+  catch (e) { toast("폴더를 열지 못했어요: " + e.message + "\n[zip으로 받기]를 이용해 주세요."); }
 }
 async function copyImage(id, i, btn) {
   try {

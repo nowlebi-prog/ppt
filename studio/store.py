@@ -23,14 +23,53 @@ SETTINGS_FILE = ROOT / "settings.json"
 WEB_DIR = RES / "web"
 
 PROJECTS_DIR.mkdir(exist_ok=True)
-# 프롬프트/규칙은 사용자가 고칠 수 있게 exe 옆에 복사해 둔다 (이미 있으면 유지)
-for _name in ("prompts", "rules"):
-    _src, _dst = RES / _name, ROOT / _name
-    if _src != _dst and _src.exists():
-        _dst.mkdir(exist_ok=True)
-        for _f in _src.glob("*.md"):
-            if not (_dst / _f.name).exists():
-                shutil.copy(_f, _dst / _f.name)
+
+
+def _sync_editable_files():
+    """프롬프트/규칙은 사용자가 고칠 수 있게 exe 옆에 복사해 둔다.
+    - 사용자가 안 고친 파일 → 새 버전으로 자동 교체
+    - 사용자가 고친 파일 → 유지 (덮어쓰지 않음)
+    """
+    import hashlib
+    manifest_f = ROOT / "prompts" / ".shipped.json"
+    try:
+        manifest = json.loads(manifest_f.read_text("utf-8"))
+    except Exception:
+        manifest = {}
+
+    def h(p: Path) -> str:
+        return hashlib.sha1(p.read_bytes()).hexdigest()
+
+    old_marker = re.compile(r"\A(DECK_SUMMARY|DESIGN_GUIDE|LAYOUT_DESIGN|LAYOUT_REVISE|SELF_CHECK|SLIDE_CHAT)\s*\n"
+                            r"|\{\{GLOBAL_RULES\}\}")
+    changed = False
+    for name in ("prompts", "rules"):
+        src, dst = RES / name, ROOT / name
+        if src == dst or not src.exists():
+            continue
+        dst.mkdir(exist_ok=True)
+        for f in src.glob("*.md"):
+            target = dst / f.name
+            key = f"{name}/{f.name}"
+            new_hash = h(f)
+            if not target.exists():
+                shutil.copy(f, target)
+            else:
+                cur = h(target)
+                untouched = manifest.get(key) == cur or (
+                    key not in manifest and old_marker.search(target.read_text("utf-8", "replace")))
+                if cur != new_hash and untouched:
+                    shutil.copy(f, target)
+                elif cur != new_hash:
+                    continue  # 사용자가 고친 파일은 유지 (manifest 도 그대로)
+            manifest[key] = new_hash
+            changed = True
+    if changed:
+        manifest_f.parent.mkdir(exist_ok=True)
+        manifest_f.write_text(json.dumps(manifest, indent=1), "utf-8")
+
+
+_sync_editable_files()
 
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()

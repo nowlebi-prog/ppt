@@ -4,10 +4,18 @@
 """
 from __future__ import annotations
 
+import io
+import platform
+import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
+
+from . import store
 
 ctx = threading.local()   # 현재 스레드의 작업 맥락 (pid, no, label, step)
 
@@ -23,14 +31,30 @@ class Skipped(RuntimeError):
     pass
 
 
-def ask(kind: str, text: str, images: list[Path], want_json: bool = False, note: str = "") -> str:
+def _folder(rid: str) -> Path:
+    return store.PROJECTS_DIR / "_relay" / rid
+
+
+def ask(kind: str, text: str, images: list[Path], want_json: bool = False, note: str = "", task: str = "",
+        descs: list[str] | None = None) -> str:
     """kind: text | image. 반환: 텍스트 답변 또는 업로드된 이미지 경로."""
     rid = uuid.uuid4().hex[:10]
     ev = threading.Event()
+    imgs = [Path(p) for p in images if p and Path(p).exists()]
+    descs = list(descs or [])[:len(imgs)] + [p.name for p in imgs[len(descs or []):]]
+    # 한 번에 끌어다 놓을 수 있게 번호 붙인 사본 폴더 준비
+    folder = _folder(rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    copies = []
+    for k, (p, d) in enumerate(zip(imgs, descs), 1):
+        safe = re.sub(r'[\\/:*?"<>|()~,]+', "", d).strip().replace(" ", "_")[:40]
+        dst = folder / f"{k:02d}_{safe}{p.suffix.lower() or '.png'}"
+        shutil.copy(p, dst)
+        copies.append(dst)
     item = {
-        "id": rid, "kind": kind, "pid": getattr(ctx, "pid", None), "no": getattr(ctx, "no", None),
+        "id": rid, "kind": kind, "task": task, "pid": getattr(ctx, "pid", None), "no": getattr(ctx, "no", None),
         "label": getattr(ctx, "label", "") or "AI 요청", "step": getattr(ctx, "step", ""),
-        "text": text, "images": [str(p) for p in images if p and Path(p).exists()],
+        "text": text, "images": [str(c) for c in copies], "descs": descs,
         "json": want_json, "note": note, "created": time.time(),
         "_event": ev, "answer": None, "file": None, "skip": False, "cancel": False,
     }
@@ -42,6 +66,8 @@ def ask(kind: str, text: str, images: list[Path], want_json: bool = False, note:
     finally:
         with _lock:
             _pending.pop(rid, None)
+        if kind == "text" or not item.get("file"):
+            shutil.rmtree(folder, ignore_errors=True)
     if item["cancel"]:
         raise Cancelled("복붙 요청을 취소했습니다. [다시 시도]를 누르면 이어서 진행합니다.")
     if item["skip"]:
@@ -87,6 +113,34 @@ def image_path(rid: str, idx: int) -> Path:
     if not item or not (0 <= idx < len(item["images"])):
         raise ValueError("이미지 없음")
     return Path(item["images"][idx])
+
+
+def open_folder(rid: str) -> None:
+    """탐색기/Finder 로 이미지 폴더 열기 → 전부 선택해서 ChatGPT 에 한 번에 끌어다 놓기."""
+    with _lock:
+        if rid not in _pending:
+            raise ValueError("이미 처리됐거나 없는 요청입니다")
+    folder = _folder(rid)
+    system = platform.system()
+    if system == "Windows":
+        import os
+        os.startfile(str(folder))  # noqa
+    elif system == "Darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
+
+
+def images_zip(rid: str) -> bytes:
+    with _lock:
+        item = _pending.get(rid)
+    if not item:
+        raise ValueError("이미 처리됐거나 없는 요청입니다")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in item["images"]:
+            z.write(f, Path(f).name)
+    return buf.getvalue()
 
 
 def save_upload(rid: str, data: bytes, suffix: str, tmp_dir: Path) -> Path:

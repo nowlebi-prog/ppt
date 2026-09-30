@@ -150,11 +150,17 @@ class H(BaseHTTPRequestHandler):
                 s = store.load_settings()
                 s["api_key"] = ("●●●●" + s["api_key"][-4:]) if s["api_key"] else ""
                 return self.send(200, s)
-            mr = re.fullmatch(r"/api/relay/(\w+)(?:/image/(\d+))?", path)
+            mr = re.fullmatch(r"/api/relay/(\w+)(?:/image/(\d+)|/(open|images\.zip))?", path)
             if mr:
                 rid = mr.group(1)
                 if method == "GET" and mr.group(2) is not None:
                     return self.file(relay.image_path(rid, int(mr.group(2))))
+                if method == "GET" and mr.group(3) == "images.zip":
+                    return self.send(200, relay.images_zip(rid), "application/zip",
+                                     {"Content-Disposition": f"attachment; filename=images-{rid}.zip"})
+                if method == "POST" and mr.group(3) == "open":
+                    relay.open_folder(rid)
+                    return self.send(200, {"ok": True})
                 if method == "POST":
                     fields, files = self.form()
                     act = fields.get("action", "answer")

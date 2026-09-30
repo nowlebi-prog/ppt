@@ -69,13 +69,52 @@ def fill(tpl: str, **kw) -> str:
     return tpl
 
 
-def system_prompt(pid: str, proj: dict) -> str:
+# 작업별로 필요한 맥락만 넣는다 (복붙 프롬프트가 불필요하게 길어지지 않게)
+CONTEXT = {
+    "summary": ("request",),
+    "plan": ("role", "rules", "request", "guide", "summary"),
+    "layout": ("role", "rules", "request", "guide"),
+    "revise": ("role", "rules", "guide"),
+    "selfcheck": ("rules", "guide"),
+    "chat": ("role", "rules", "request", "guide", "summary"),
+    "guide": ("role", "rules", "request"),
+}
+
+
+def clean_guide(md: str) -> str:
+    """가이드에서 사용 안내문(>)과 빈 섹션 제거."""
+    lines = [l for l in (md or "").split("\n") if not l.lstrip().startswith(">")]
+    out = []
+    for k, l in enumerate(lines):
+        if l.startswith("## "):
+            rest = lines[k + 1:]
+            nxt = next((x for x in rest if x.strip()), "")
+            if not nxt or nxt.startswith("## "):
+                continue  # 내용 없는 섹션
+        out.append(l)
+    return "\n".join(out).strip()
+
+
+def system_prompt(pid: str, proj: dict, task: str = "plan") -> str:
     d = store.pdir(pid)
-    return fill(store.prompt("system"),
-                GLOBAL_RULES=store.read_text(store.RULES_DIR / "global_rules.md"),
-                REQUEST=proj.get("request") or "(없음)",
-                GUIDE=store.read_text(d / "guide.md"),
-                SUMMARY=store.read_text(d / "summary.md", "(아직 없음)"))
+    want = CONTEXT.get(task, CONTEXT["plan"])
+    out = []
+    if "role" in want:
+        out.append(store.prompt("system").strip())
+    if "rules" in want:
+        out.append("## 공통 금지 규칙 (AI스러움 금지)\n" + store.read_text(store.RULES_DIR / "global_rules.md").strip())
+    req = (proj.get("request") or "").strip()
+    if "request" in want and len(req) >= 2:
+        out.append("## 이 프로젝트 요청사항\n" + req)
+    if "guide" in want:
+        g = clean_guide(store.read_text(d / "guide.md"))
+        if g:
+            out.append("## 이 프로젝트 디자인 가이드 (항상 우선 적용)\n" + g.replace("# 디자인 가이드", "").strip())
+    if "summary" in want:
+        sm = store.read_text(d / "summary.md").strip()
+        if sm:
+            out.append("## 덱 전체 요약\n" + sm)
+    return "\n\n".join(out)
 
 
 def template_path(pid: str, proj: dict) -> Path | None:
@@ -196,28 +235,40 @@ def do_ingest(pid: str, files: list[str]):
                 s["kind"] = "cover"
     store.update(pid, fn)
     do_summary(pid)
+    if guide_is_template(pid):
+        do_guide(pid)  # 원본 톤 + 레퍼런스 + 요청사항 → 이 프로젝트 전용 가이드
+
+
+def guide_is_template(pid: str) -> bool:
+    g = store.read_text(store.pdir(pid) / "guide.md")
+    return g.strip() == store.read_text(store.RULES_DIR / "guide_template.md").strip()
 
 
 def do_summary(pid: str):
+    relay.ctx.step = "1/2 덱 내용 파악"
     proj = store.load(pid)
     s = store.load_settings()
-    imgs = [store.pdir(pid) / pg["image"] for pg in proj["pages"] if pg["image"]][:20]
-    out = llm.chat(s, system_prompt(pid, proj), [fill(store.prompt("understand"), DECK_TEXT=deck_text(proj))] + imgs)
+    imgs = [store.pdir(pid) / pg["image"] for pg in proj["pages"] if pg["image"]]  # 전부 (모음 시트로 합쳐서 전송)
+    out = llm.chat(s, system_prompt(pid, proj, "summary"),
+                   [fill(store.prompt("understand"), DECK_TEXT=deck_text(proj))] + imgs, task="summary")
     (store.pdir(pid) / "summary.md").write_text(out, "utf-8")
 
 
 def do_guide(pid: str):
+    relay.ctx.step = "2/2 이 프로젝트 디자인 가이드 작성" if not store.load(pid)["slides"] or all(
+        s["stage"] == "todo" for s in store.load(pid)["slides"].values()) else "디자인 가이드 작성"
     proj = store.load(pid)
     d = store.pdir(pid)
     s = store.load_settings()
     imgs = _images(d / "refs", MAX_REFS)
+    imgs += [d / pg["image"] for pg in proj["pages"] if pg["image"]]  # 원본 톤 파악용 (모음 시트로 합쳐 전송)
     for sl in proj["slides"].values():
         i = current_index(sl)
         if sl["stage"] == "done" and i >= 0 and sl["versions"][i].get("preview"):
             imgs.append(d / sl["versions"][i]["preview"])
-    out = llm.chat(s, system_prompt(pid, proj), [fill(
-        store.prompt("guide_build"), GUIDE=store.read_text(d / "guide.md"),
-        RULES_LOG="\n".join(f"- {r}" for r in proj.get("rules_log", [])) or "(없음)")] + imgs[:12])
+    out = llm.chat(s, system_prompt(pid, proj, "guide"), [fill(
+        store.prompt("guide_build"), GUIDE=clean_guide(store.read_text(d / "guide.md")),
+        RULES_LOG="\n".join(f"- {r}" for r in proj.get("rules_log", [])) or "(없음)")] + imgs[:60], task="guide")
     (d / "guide.md").write_text(out, "utf-8")
 
 
@@ -263,7 +314,7 @@ def do_plan(pid: str, no: int, feedback: str = "", annotated: str = ""):
         fb = f"\n--- 이전 기획안 ---\n{sl['plan']}\n\n--- 사용자 수정 요청 (반드시 반영) ---\n{feedback}"
     tpl = store.prompt("plan_cover" if sl["kind"] == "cover" else "plan")
     text = fill(tpl, SLIDE_NO=no, SLIDE_TEXT=pg["text"] or "(텍스트 없음, 이미지 참고)",
-                PREV_PLANS="\n\n".join(prev) or "(없음)", FEEDBACK=fb,
+                PREV_PLANS=("\n--- 앞서 확정된 장표 기획 (톤 유지용) ---\n" + "\n\n".join(prev)) if prev else "", FEEDBACK=fb,
                 KEEP_GAME="게임/제품 이미지는 원본 그대로 둔다." if sl.get("keep_game_images") else "")
     parts = [text]
     if pg["image"]:
@@ -271,7 +322,7 @@ def do_plan(pid: str, no: int, feedback: str = "", annotated: str = ""):
     if annotated:
         parts.append(d / annotated)
     parts += _images(d / "refs", MAX_REFS)
-    out = llm.chat(s, system_prompt(pid, proj), parts)
+    out = llm.chat(s, system_prompt(pid, proj, "plan"), parts, task="plan")
     warns = factcheck.check(out, deck_text(proj) + "\n" + (proj.get("request") or ""))
 
     def fn(p):
@@ -409,10 +460,11 @@ def load_layout(pid: str, sl: dict, idx: int | None = None) -> dict:
     return json.loads((store.pdir(pid) / sl["versions"][i]["layout"]).read_text("utf-8"))
 
 
-def _layout_llm(pid: str, no: int, prompt_text: str, images: list[Path]) -> dict:
+def _layout_llm(pid: str, no: int, prompt_text: str, images: list[Path], task: str = "layout") -> dict:
     proj = store.load(pid)
     s = store.load_settings()
-    res = llm.chat_json(s, system_prompt(pid, proj), [prompt_text] + [i for i in images if i and i.exists()])
+    res = llm.chat_json(s, system_prompt(pid, proj, task), [prompt_text] + [i for i in images if i and i.exists()],
+                        task=task)
     if "layout" in res and isinstance(res["layout"], dict) and "elements" not in res:
         res = {**res["layout"], "rules": res.get("rules", [])}
     return res
@@ -449,7 +501,7 @@ def _self_check(pid: str, no: int, idx: int) -> int:
     if v.get("preview"):
         step(pid, no, "AI 자체 점검 중")
         res = _layout_llm(pid, no, fill(store.prompt("selfcheck"), AUTO="\n".join(auto) or "(없음)"),
-                          [d / v["preview"]])
+                          [d / v["preview"]], task="selfcheck")
         issues += [str(i) for i in res.get("issues", [])]
     if not issues:
         return idx
@@ -504,7 +556,7 @@ def _revise_core(pid: str, no: int, base_idx: int, feedback: str, marks: list, a
                 FEEDBACK=feedback, LAYOUT=json.dumps(base, ensure_ascii=False), PLAN=sl["plan"],
                 RULES_ASK=RULES_ASK if save_rule else "")
     shot = d / annotated if annotated else (d / v["preview"] if v.get("preview") else None)
-    layout = _layout_llm(pid, no, text, [shot, d / pg["image"] if pg["image"] else None])
+    layout = _layout_llm(pid, no, text, [shot, d / pg["image"] if pg["image"] else None], task="revise")
     rules = [str(r) for r in (layout.pop("rules", None) or []) if str(r).strip()]
     if save_rule and rules:
         add_rules(pid, rules, global_scope=(save_rule == "global"))
@@ -563,7 +615,7 @@ def chat(pid: str, no: int, message: str) -> str:
         if pg["image"]:
             imgs.append(d / pg["image"])
         text = fill(store.prompt("chat"), SLIDE_NO=no, PLAN=sl["plan"] or "(없음)", LAYOUT=layout_txt, MESSAGE=message)
-        answer = llm.chat(s, system_prompt(pid, proj), [text] + imgs, history=sl["chat"][-12:])
+        answer = llm.chat(s, system_prompt(pid, proj, "chat"), [text] + imgs, history=sl["chat"][-12:], task="chat")
 
         def fn(p):
             c = p["slides"][str(no)]["chat"]
