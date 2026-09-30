@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 HEX = re.compile(r"^#?[0-9A-Fa-f]{6}$")
+INTERNAL_COLORS = {"F3F3F1"}  # 자리표시 박스 등 프로그램이 쓰는 색 (팔레트 검사 제외)
 DEFAULT_W_PT, DEFAULT_H_PT = 960.0, 540.0  # 13.333 x 7.5 inch
 
 
@@ -143,7 +144,8 @@ class Renderer:
         return int(self.prs.slide_height * max(0.0, min(100.0, float(v))) / 100)
 
     def _color(self, c, default):
-        if isinstance(c, str) and HEX.match(c) and self.palette and c.upper().lstrip("#") not in self.palette:
+        if (isinstance(c, str) and HEX.match(c) and self.palette
+                and c.upper().lstrip("#") not in self.palette | INTERNAL_COLORS):
             self.warnings.append(f"가이드 팔레트 밖 색상: {c}")
         return _rgb(c, default)
 
