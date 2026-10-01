@@ -66,20 +66,21 @@ def _meter(kind: str, info: dict):
 
 
 def chat(settings: dict, system: str, parts: list, json_mode: bool = False,
-         history: list[dict] | None = None) -> str:
-    """parts: 문자열 또는 Path(이미지) 의 리스트. history: [{role: user|assistant, text}] (이전 대화)."""
+         history: list[dict] | None = None, task: str = "") -> str:
+    """parts: 문자열 또는 Path(이미지) 의 리스트. history: [{role: user|assistant, text}] (이전 대화).
+    task: 작업 종류 (summary, plan, layout, revise, selfcheck, chat, guide) — 데모 응답/복붙 카드 표시에 사용."""
     if settings.get("mock"):
         _meter("text", {})
-        return _mock_chat(system, parts, json_mode)
+        return _mock_chat(task, json_mode)
     if settings.get("mode") == "manual":
-        return _manual_chat(system, parts, json_mode, history)
-    content = []
-    for p in parts:
-        if isinstance(p, Path):
-            if p.exists():
-                content.append({"type": "image_url", "image_url": {"url": _data_url(p), "detail": "high"}})
-        elif p:
-            content.append({"type": "text", "text": str(p)})
+        return _manual_chat(system, parts, json_mode, history, task=task)
+    content = [{"type": "text", "text": str(p)} for p in parts if isinstance(p, str) and p]
+    imgs = compact_images([p for p in parts if isinstance(p, Path) and p.exists()], max_single=6)
+    if imgs:
+        content.append({"type": "text", "text": "[첨부 이미지 — 순서대로]\n" + "\n".join(
+            f"{k + 1}. {d}" for k, (_, d) in enumerate(imgs))})
+    for p, _ in imgs:
+        content.append({"type": "image_url", "image_url": {"url": _data_url(p), "detail": "high"}})
     messages = [{"role": "system", "content": system}]
     for h in history or []:
         messages.append({"role": "assistant" if h["role"] in ("ai", "assistant") else "user", "content": h["text"]})
@@ -104,12 +105,12 @@ def parse_json(txt: str) -> dict:
     return json.loads(txt[a: b + 1])
 
 
-def chat_json(settings: dict, system: str, parts: list) -> dict:
+def chat_json(settings: dict, system: str, parts: list, task: str = "") -> dict:
     manual = settings.get("mode") == "manual" and not settings.get("mock")
     note = ""
     for attempt in range(3 if manual else 1):
-        txt = (_manual_chat(system, parts, True, None, note) if manual
-               else chat(settings, system, parts, json_mode=True))
+        txt = (_manual_chat(system, parts, True, None, note, task=task) if manual
+               else chat(settings, system, parts, json_mode=True, task=task))
         try:
             return parse_json(txt)
         except Exception as e:
@@ -121,22 +122,87 @@ def chat_json(settings: dict, system: str, parts: list) -> dict:
 
 # ---------------------------------------------------------------- 복붙 모드
 
-def _manual_chat(system: str, parts: list, json_mode: bool, history: list[dict] | None, note: str = "") -> str:
+def describe(p: Path) -> tuple[str, str]:
+    """첨부 이미지 경로 → (분류, 설명)."""
+    parts = Path(p).parts
+    name = Path(p).stem
+    if "pages" in parts:
+        return "pages", f"{int(name) if name.isdigit() else name}번 장표 원본"
+    if "refs" in parts:
+        return "refs", "톤앤매너 레퍼런스"
+    if "feedback" in parts:
+        return "other", "사용자가 빨간 펜으로 표시한 현재 장표"
+    if "slides" in parts and name.startswith("v") and name[1:].isdigit():
+        return "other", f"현재 장표 미리보기 (v{name[1:]})"
+    if "assets" in parts and "slides" not in parts:
+        return "assets", f"실제 자산 ({Path(p).name})"
+    return "other", Path(p).name
+
+
+def compact_images(imgs: list[Path], max_single: int = 3) -> list[tuple[Path, str]]:
+    """복붙 모드: 이미지가 많으면 분류별로 번호 붙은 모음 시트로 합친다 (드래그 횟수 최소화)."""
+    items = [(p, *describe(p)) for p in imgs]
+    if len(items) <= max_single:
+        return [(p, d) for p, _, d in items]
+    try:
+        from . import sheets, store
+        out_dir = store.PROJECTS_DIR / "_relay" / "sheets"
+    except Exception:
+        return [(p, d) for p, _, d in items]
+    result, done = [], set()
+    for p, cat, desc in items:
+        if cat in done:
+            continue
+        group = [(q, dd) for q, c, dd in items if c == cat]
+        if cat == "other" or len(group) == 1:
+            if cat != "other":
+                done.add(cat)
+                result.append(group[0])
+            else:
+                result.append((p, desc))
+            continue
+        done.add(cat)
+        if cat == "pages":
+            labels = [(q, dd.replace(" 원본", "")) for q, dd in group]
+        else:
+            labels = [(q, f"{k + 1}") for k, (q, _) in enumerate(group)]
+        try:
+            files = sheets.contact_sheets(labels, out_dir)
+        except Exception:
+            result += group
+            continue
+        for k, f in enumerate(files):
+            sub_ = labels[k * 9:(k + 1) * 9]
+            if cat == "pages":
+                nums = [lab.replace("번 장표", "") for _, lab in sub_]
+                result.append((f, f"원본 장표 모음 ({nums[0]}~{nums[-1]}번, 각 칸 위에 번호)"))
+            elif cat == "refs":
+                result.append((f, f"톤앤매너 레퍼런스 모음 ({len(sub_)}장)"))
+            else:
+                result.append((f, f"실제 자산 모음 ({len(sub_)}장)"))
+    return result
+
+
+def _manual_chat(system: str, parts: list, json_mode: bool, history: list[dict] | None, note: str = "",
+                 task: str = "") -> str:
     from . import relay
     texts = [p for p in parts if isinstance(p, str) and p]
-    imgs = [p for p in parts if isinstance(p, Path) and p.exists()]
-    out = ["[작업 지침 — 반드시 따를 것]", system.strip(), ""]
+    imgs = compact_images([p for p in parts if isinstance(p, Path) and p.exists()])
+    out = []
     if history:
-        out.append("[이전 대화]")
+        out.append("[지금까지 이 장표에 대해 나눈 대화]")
         out += [f"{'나' if h['role'] == 'user' else '너'}: {h['text']}" for h in history]
         out.append("")
-    out.append("[이번 요청]")
     out += texts
     if imgs:
-        out.append(f"\n(첨부 이미지 {len(imgs)}장을 순서대로 함께 보냈어. 요청에 적힌 순서대로 참고해.)")
+        out.append("\n[첨부 이미지 — 순서대로]")
+        out += [f"{k + 1}. {d}" for k, (_, d) in enumerate(imgs)]
     if json_mode:
-        out.append("\n반드시 설명 없이 ```json 코드블록 하나로만 답해줘. JSON 외의 글은 쓰지 마.")
-    return relay.ask("text", "\n".join(out), imgs, want_json=json_mode, note=note)
+        out.append("\n※ 설명 없이 ```json 코드블록 하나로만 답해줘.")
+    if system.strip():
+        out += ["", "━━━━━━━━━━━━━━━━━━━━", "[참고: 작업 규칙 · 디자인 가이드 — 위 요청을 할 때 반드시 지킬 것]", system.strip()]
+    return relay.ask("text", "\n".join(out), [p for p, _ in imgs], want_json=json_mode, note=note,
+                     task=task, descs=[d for _, d in imgs])
 
 
 def _multipart(fields: dict, files: list[tuple[str, Path]]) -> tuple[bytes, str]:
@@ -161,7 +227,9 @@ def image(settings: dict, prompt: str, out: Path, refs: list[Path] | None = None
         from . import relay
         guide = (f"아래 설명대로 이미지 1장만 만들어줘. 크기 {size or '1024x1024'}"
                  + (", 투명 배경 PNG" if transparent else "") + ". 이미지 안에 글자는 넣지 마.\n\n")
-        got = relay.ask("image", guide + prompt, [r for r in (refs or []) if r.exists()][:4])
+        ref_items = compact_images([r for r in (refs or []) if r.exists()][:4], max_single=1)
+        got = relay.ask("image", guide + prompt + ("\n\n첨부 이미지는 스타일 참고용이야." if ref_items else ""),
+                        [p for p, _ in ref_items], task="asset", descs=[d for _, d in ref_items])
         import shutil
         shutil.copy(got, out)
         return out
@@ -254,22 +322,21 @@ def _mock_layout(revised: bool) -> dict:
     ]}
 
 
-def _mock_chat(system: str, parts: list, json_mode: bool) -> str:
-    text = "\n".join(p for p in parts if isinstance(p, str))
+def _mock_chat(task: str, json_mode: bool) -> str:
     time.sleep(0.3)
-    if json_mode and "LAYOUT_DESIGN" in text:
+    if json_mode and task == "layout":
         return json.dumps(_mock_layout(False), ensure_ascii=False)
-    if json_mode and "LAYOUT_REVISE" in text:
+    if json_mode and task == "revise":
         return json.dumps({**_mock_layout(True), "rules": ["손글씨/낙서 스타일 텍스트 금지"]}, ensure_ascii=False)
-    if json_mode and "SELF_CHECK" in text:
+    if json_mode and task == "selfcheck":
         return json.dumps({"ok": True, "issues": []}, ensure_ascii=False)
     if json_mode:
-        return json.dumps({"rules": ["손글씨/낙서 스타일 텍스트 금지"]}, ensure_ascii=False)
-    if "SLIDE_CHAT" in text:
+        return json.dumps({"rules": []}, ensure_ascii=False)
+    if task == "chat":
         return "(데모) 메인 문구가 두 줄로 넘어가서 위계가 약해 보여요. 30pt로 줄이고 서브와 간격을 넓히면 좋겠습니다."
-    if "DESIGN_GUIDE" in text:
+    if task == "guide":
         return "# 디자인 가이드 (데모)\n\n- 배경: #FFFFFF\n- 폰트: Pretendard\n- 포인트: #FF6B2C\n"
-    if "DECK_SUMMARY" in text:
+    if task == "summary":
         return "## 핵심 메시지\n(데모) 덱 요약입니다.\n\n## 장표 구성\n1. Cover\n2. Team\n"
     return ("## 이 장표의 역할\n(데모) 투자자가 3초 안에 핵심을 이해하게 만든다.\n\n"
             "## 메인 / 서브\n- 메인: 데모 메인 문구입니다\n- 서브: 데모 서브 문구입니다\n\n"
